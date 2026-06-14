@@ -1,0 +1,247 @@
+import yfinance as yf
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+
+# ================================
+# YOUR REAL PORTFOLIO
+# ================================
+portfolio = {
+    "COIN": {"shares": 3.8405, "basis": 793.27},
+    "META": {"shares": 1.055,  "basis": 712.32},
+    "MSFT": {"shares": 3.033,  "basis": 1293.93},
+    "PLTR": {"shares": 2,      "basis": 267.50},
+    "SCHD": {"shares": 14,     "basis": 436.17}
+}
+
+rf = 0.045  # risk free rate
+tickers = list(portfolio.keys())
+total_basis = sum(v["basis"] for v in portfolio.values())
+
+# ================================
+# DOWNLOAD DATA (Recent = More Relevant)
+# ================================
+data = yf.download(tickers + ["^GSPC"],
+                   start="2024-01-01",
+                   auto_adjust=True,
+                   progress=False)["Close"]
+
+data.columns = data.columns.get_level_values(0)
+returns = data.pct_change().dropna()
+
+current_prices = data.iloc[-1]
+
+# ================================
+# QUESTION 1 — WHAT DO I OWN?
+# ================================
+print("=" * 55)
+print("QUESTION 1: WHAT DO I OWN TODAY?")
+print("=" * 55)
+
+total_current = 0
+results = []
+
+for ticker, info in portfolio.items():
+    shares = info["shares"]
+    basis = info["basis"]
+    price = current_prices[ticker]
+    value = shares * price
+    pnl = value - basis
+    pnl_pct = (pnl / basis) * 100
+    weight = value  # will normalize later
+
+    total_current += value
+
+    results.append({
+        "ticker": ticker,
+        "shares": shares,
+        "basis": basis,
+        "price": price,
+        "value": value,
+        "pnl": pnl,
+        "pnl_pct": pnl_pct
+    })
+
+    print(f"\n{ticker}:")
+    print(f"  Shares:  {shares}")
+    print(f"  Price:   ${price:.2f}")
+    print(f"  Value:   ${value:.2f}")
+    print(f"  P&L:     ${pnl:+.2f} ({pnl_pct:+.2f}%)")
+
+# Normalize weights based on CURRENT value
+weights = np.array([r["value"]/total_current
+                    for r in results])
+
+# ================================
+# QUESTION 2 — HOW AM I PERFORMING?
+# ================================
+total_pnl = total_current - total_basis
+total_pnl_pct = (total_pnl / total_basis) * 100
+
+print("\n" + "=" * 55)
+print("QUESTION 2: HOW AM I PERFORMING?")
+print("=" * 55)
+print(f"Total Invested:  ${total_basis:,.2f}")
+print(f"Current Value:   ${total_current:,.2f}")
+print(f"Total P&L:       ${total_pnl:+,.2f}")
+print(f"Total Return:    {total_pnl_pct:+.2f}%")
+
+# vs S&P 500
+sp500_return = (data["^GSPC"].iloc[-1] /
+                data["^GSPC"].iloc[0] - 1) * 100
+print(f"\nS&P 500 Return:  {sp500_return:+.2f}%")
+
+if total_pnl_pct > sp500_return:
+    print("✅ You are BEATING the market!")
+else:
+    print("⚠️ Market is beating your portfolio")
+
+# ================================
+# QUESTION 3 — HOW MUCH RISK?
+# ================================
+portfolio_returns = returns[tickers].dot(weights)
+
+annual_vol = portfolio_returns.std() * np.sqrt(252)
+annual_return = portfolio_returns.mean() * 252
+daily_var = portfolio_returns.quantile(0.05)
+sharpe = (annual_return - rf) / annual_vol
+worst_day_loss = total_current * daily_var
+
+print("\n" + "=" * 55)
+print("QUESTION 3: HOW MUCH RISK?")
+print("=" * 55)
+print(f"Annual Volatility: {annual_vol:.2%}")
+print(f"Annual Return:     {annual_return:.2%}")
+print(f"Sharpe Ratio:      {sharpe:.2f}")
+print(f"Worst Daily Loss:  ${abs(worst_day_loss):.2f}")
+
+if annual_vol > 0.30:
+    risk_level = "HIGH RISK"
+elif annual_vol > 0.15:
+    risk_level = "MEDIUM RISK"
+else:
+    risk_level = "LOW RISK"
+print(f"Risk Level: {risk_level}")
+
+# ================================
+# QUESTION 4 — WHERE AM I GOING? (Monte Carlo)
+# ================================
+drift = portfolio_returns.mean()
+volatility = portfolio_returns.std()
+
+M = 1000
+N = 252 * 3  # 3 years
+
+simulations = np.zeros((N, M))
+simulations[0] = total_current
+
+for m in range(M):
+    for t in range(1, N):
+        Z = np.random.normal(0, 1)
+        simulations[t, m] = simulations[t-1, m] * np.exp(
+            drift - 0.5*volatility**2 + volatility*Z
+        )
+
+final_values = simulations[-1, :]
+
+p5 = np.percentile(final_values, 5)
+p50 = np.percentile(final_values, 50)
+p95 = np.percentile(final_values, 95)
+prob_profit = (final_values > total_current).mean()
+
+print("\n" + "=" * 55)
+print("QUESTION 4: WHERE WILL I BE IN 3 YEARS?")
+print("=" * 55)
+print(f"Starting:   ${total_current:,.2f}")
+print(f"Worst (5%): ${p5:,.2f}")
+print(f"Base (50%): ${p50:,.2f}")
+print(f"Best (95%): ${p95:,.2f}")
+print(f"Profit Probability: {prob_profit:.1%}")
+
+# ================================
+# QUESTION 5 — AM I OPTIMIZED? (Beta + Sharpe per stock)
+# ================================
+print("\n" + "=" * 55)
+print("QUESTION 5: AM I OPTIMIZED?")
+print("=" * 55)
+
+market_var = returns["^GSPC"].var()
+
+for i, ticker in enumerate(tickers):
+    stock_ret = returns[ticker].mean() * 252
+    stock_vol = returns[ticker].std() * np.sqrt(252)
+    stock_sharpe = (stock_ret - rf) / stock_vol
+    cov = returns[ticker].cov(returns["^GSPC"])
+    beta = cov / market_var
+
+    print(f"\n{ticker}:")
+    print(f"  Weight:  {weights[i]:.2%}")
+    print(f"  Return:  {stock_ret:.2%}")
+    print(f"  Risk:    {stock_vol:.2%}")
+    print(f"  Beta:    {beta:.2f}")
+    print(f"  Sharpe:  {stock_sharpe:.2f}")
+
+    if stock_sharpe < 0.3 and weights[i] > 0.15:
+        print(f"  ⚠️  Consider REDUCING {ticker}")
+    elif stock_sharpe > 1 and weights[i] < 0.20:
+        print(f"  ✅ Consider INCREASING {ticker}")
+
+# ================================
+# CHARTS — ALL 5 QUESTIONS
+# ================================
+fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+fig.suptitle("My Portfolio Dashboard", fontsize=16)
+
+colors = ["red", "blue", "purple", "orange", "green"]
+
+# Chart 1 — Allocation
+values = [r["value"] for r in results]
+axes[0,0].pie(values, labels=tickers,
+              autopct='%1.1f%%', colors=colors)
+axes[0,0].set_title(
+    f"Current Allocation\nTotal: ${total_current:,.2f}")
+
+# Chart 2 — P&L per Stock
+pnls = [r["pnl"] for r in results]
+bar_colors = ["green" if p>0 else "red" for p in pnls]
+axes[0,1].bar(tickers, pnls, color=bar_colors, alpha=0.7)
+axes[0,1].axhline(y=0, color="black", linestyle="--")
+axes[0,1].set_title(f"P&L per Stock\nTotal: ${total_pnl:+.2f}")
+axes[0,1].set_ylabel("P&L $")
+axes[0,1].grid(True)
+
+# Chart 3 — Monte Carlo
+axes[1,0].plot(simulations[:, :200], alpha=0.1,
+               linewidth=0.5, color="blue")
+axes[1,0].plot(np.percentile(simulations, 5, axis=1),
+              color="red", linewidth=2, label=f"Worst: ${p5:,.0f}")
+axes[1,0].plot(np.percentile(simulations, 50, axis=1),
+              color="green", linewidth=2, label=f"Base: ${p50:,.0f}")
+axes[1,0].plot(np.percentile(simulations, 95, axis=1),
+              color="orange", linewidth=2, label=f"Best: ${p95:,.0f}")
+axes[1,0].axhline(y=total_current, color="black",
+                  linestyle="--", label=f"Today: ${total_current:,.0f}")
+axes[1,0].set_title("Monte Carlo — 3 Year Forecast")
+axes[1,0].set_ylabel("Value $")
+axes[1,0].legend()
+axes[1,0].grid(True)
+
+# Chart 4 — Risk vs Return per stock
+for i, ticker in enumerate(tickers):
+    ret = returns[ticker].mean() * 252
+    vol = returns[ticker].std() * np.sqrt(252)
+    axes[1,1].scatter(vol, ret, s=weights[i]*1000,
+                     color=colors[i], zorder=5, label=ticker)
+    axes[1,1].annotate(ticker, (vol, ret),
+                       textcoords="offset points", xytext=(10,5))
+
+axes[1,1].set_title("Risk vs Return")
+axes[1,1].set_xlabel("Risk (Volatility)")
+axes[1,1].set_ylabel("Return")
+axes[1,1].axhline(y=0, color="black", linestyle="--", alpha=0.3)
+axes[1,1].grid(True)
+
+plt.tight_layout()
+plt.savefig("my_portfolio_dashboard.png")
+plt.show()
